@@ -222,7 +222,7 @@ enum pad_gpios {
 	PAD2_GPIO = 1,
 	PAD3_GPIO = 4,
 	PAD4_GPIO = 7,
-	PAD5_GPIO = 2,
+	PAD5_GPIO = 15,
 	PAD6_GPIO = 3
 };
 
@@ -231,7 +231,7 @@ enum common_gpios {
 	NES_CLOCK_GPIO = 10,
 	NES_LATCH_GPIO = 11,
 	PSX_COMMAND_GPIO = 14,
-	PSX_SELECT_GPIO = 15,
+	PSX_DATA_GPIO = 2,
 	PSX_CLOCK_GPIO = 18
 };
 
@@ -774,7 +774,7 @@ static void gc_nes_process_packet(struct gc *gc)
  *
  */
 
-#define GC_PSX_DELAY	3		/* clock phase length in us. Valid clkfreq is 100kHz...500kHz. 2*udelay(3) results to ~250kHz on RPi1. */
+#define GC_PSX_DELAY	6		/* clock phase length in us. Valid clkfreq is 100kHz...500kHz. 2*udelay(3) results to ~250kHz on RPi1. */
 #define GC_PSX_DELAY2	25		/* delay between bytes. */
 #define GC_PSX_LENGTH	8		/* talk to the controller in bits */
 #define GC_PSX_BYTES	6		/* the maximum number of bytes to read off the controller */
@@ -787,7 +787,7 @@ static void gc_nes_process_packet(struct gc *gc)
 
 #define GC_PSX_CLOCK	(1<<PSX_CLOCK_GPIO)
 #define GC_PSX_COMMAND	(1<<PSX_COMMAND_GPIO)
-#define GC_PSX_SELECT	(1<<PSX_SELECT_GPIO)
+#define GC_PSX_DATA	(1<<PSX_DATA_GPIO)
 
 #define GC_PSX_ID(x)	((x) >> 4)	/* High nibble is device type */
 #define GC_PSX_LEN(x)	(((x) & 0xf) << 1)	/* Low nibble is length in bytes/2 */
@@ -806,9 +806,9 @@ static const short gc_psx_ddr_btn[] = { BTN_0, BTN_1, BTN_2, BTN_3 };
  * the psx pad.
  */
 
-static void gc_psx_command(struct gc *gc, int b, unsigned char *data)
+static void gc_psx_command(struct gc *gc, int b, unsigned char *data, int pad_no)
 {
-	int i, j;
+	int i;
 	unsigned long read;
 
 	memset(data, 0, GC_MAX_DEVICES);
@@ -827,12 +827,7 @@ static void gc_psx_command(struct gc *gc, int b, unsigned char *data)
 
 		read = GPIO_STATUS;
 
-		for (j = 0; j < GC_MAX_DEVICES; j++) {
-			struct gc_pad *pad = &gc->pads[j];
-
-			if (pad->type == GC_PSX || pad->type == GC_DDR)
-				data[j] |= (read & gc_status_bit[j]) ? (1 << i) : 0;
-		}
+		data[pad_no] |= (read & GC_PSX_DATA) ? (1 << i) : 0;
 
 		udelay(GC_PSX_DELAY);
 	}
@@ -851,46 +846,42 @@ static void gc_psx_read_packet(struct gc *gc,
 {
 	int i, j, max_len = 0;
 	unsigned long flags;
+	unsigned char status;
 	unsigned char data2[GC_MAX_DEVICES];
+	unsigned char id2[GC_MAX_DEVICES];
 
-	local_irq_save(flags);
-
-	/* Select pad */
-	GPIO_SET = GC_PSX_CLOCK | GC_PSX_SELECT;
-	
-	/* Deselect, begin command */
-	GPIO_CLR = GC_PSX_SELECT;
-	udelay(GC_PSX_DELAY2);
-
-	gc_psx_command(gc, 0x01, data2);	/* Access pad */
-	gc_psx_command(gc, 0x42, id);		/* Get device ids */
-	gc_psx_command(gc, 0, data2);		/* Dump status */
-
-	/* Find the longest pad */
-	for (i = 0; i < GC_MAX_DEVICES; i++) {
-		struct gc_pad *pad = &gc->pads[i];
-
-		if ((pad->type == GC_PSX || pad->type == GC_DDR) &&
-			GC_PSX_LEN(id[i]) > max_len &&
-			GC_PSX_LEN(id[i]) <= GC_PSX_BYTES) {
-			max_len = GC_PSX_LEN(id[i]);
+	for(j = 0; j < GC_MAX_DEVICES; j++) {
+		struct gc_pad *pad = &gc->pads[j];
+		if (!(pad->type == GC_PSX || pad->type == GC_DDR)) {
+			continue;
 		}
-	}
+		local_irq_save(flags);
 
-	/* Read in all the data */
-	for (i = 0; i < max_len; i++) {
-		gc_psx_command(gc, 0, data2);
-		for (j = 0; j < GC_MAX_DEVICES; j++)
+		/* Select pad */
+		GPIO_SET = GC_PSX_CLOCK | gc_status_bit[j];
+		
+		/* Deselect, begin command */
+		GPIO_CLR = gc_status_bit[j];
+		udelay(GC_PSX_DELAY2);
+
+		gc_psx_command(gc, 0x01, data2, j);	/* Access pad */
+		gc_psx_command(gc, 0x42, id2, j);		/* Get device ids */
+		id[j] = id2[j];
+		max_len = GC_PSX_LEN(id[j]);
+		gc_psx_command(gc, 0, data2, j);		/* Dump status */
+		status = data2[j];
+
+		/* Read in all the data */
+		for (i = 0; i < max_len; i++) {
+			gc_psx_command(gc, 0, data2, j);
 			data[j][i] = data2[j];
+		}
+
+		local_irq_restore(flags);
+
+		GPIO_SET = GC_PSX_CLOCK | gc_status_bit[j];
+		id[j] = GC_PSX_ID(id[j]);
 	}
-
-	local_irq_restore(flags);
-
-	GPIO_SET = GC_PSX_CLOCK | GC_PSX_SELECT;
-
-	/* Set id's to the real value */
-	for (i = 0; i < GC_MAX_DEVICES; i++)
-		id[i] = GC_PSX_ID(id[i]);
 }
 
 static void gc_psx_report_one(struct gc_pad *pad, unsigned char psx_type,
@@ -1235,19 +1226,10 @@ static int __init gc_setup_pad(struct gc *gc, int idx, int pad_type)
 			goto err_free_dev2;
 	}
 
-	/* set data pin to input */
+	/* set data pin to output */
 	*(gpio+(gc_gpio_ids[idx]/10)) &= ~(7<<((gc_gpio_ids[idx]%10)*3));
+        *(gpio+(gc_gpio_ids[idx]/10)) |= (1<<((gc_gpio_ids[idx]%10)*3));
 	
-	/* enable pull-up on GPIO4 or higher */
-	if (gc_gpio_ids[idx] >= 4) {
-		*(gpio+37) = 0x02;
-		udelay(10);
-		*(gpio+38) = (1 << gc_gpio_ids[idx]);
-		udelay(10);
-		*(gpio+37) = 0x00;
-		*(gpio+38) = 0x00;
-	}
-		
 	pr_info("GPIO%d configured for %s data pin\n", gc_gpio_ids[idx], gc_names[pad_type]);
 
 	return 0;
@@ -1314,13 +1296,13 @@ static struct gc __init *gc_probe(int *pads, int n_pads)
 	if (gc->pad_count[GC_PSX] ||
 		gc->pad_count[GC_DDR]) {
 
-		/* set clk, cmd & sel pins to OUTPUT */
+		/* set clk, cmd pins to OUTPUT */
 		*(gpio+(PSX_CLOCK_GPIO/10)) &= ~(7<<((PSX_CLOCK_GPIO%10)*3));
 		*(gpio+(PSX_CLOCK_GPIO/10)) |= (1<<((PSX_CLOCK_GPIO%10)*3));
 		*(gpio+(PSX_COMMAND_GPIO/10)) &= ~(7<<((PSX_COMMAND_GPIO%10)*3));
 		*(gpio+(PSX_COMMAND_GPIO/10)) |= (1<<((PSX_COMMAND_GPIO%10)*3));
-		*(gpio+(PSX_SELECT_GPIO/10)) &= ~(7<<((PSX_SELECT_GPIO%10)*3));
-		*(gpio+(PSX_SELECT_GPIO/10)) |= (1<<((PSX_SELECT_GPIO%10)*3));
+		/* data pin to INPUT */
+		*(gpio+(PSX_DATA_GPIO/10)) &= ~(7<<((PSX_DATA_GPIO%10)*3));
 	}
 
 	return gc;
