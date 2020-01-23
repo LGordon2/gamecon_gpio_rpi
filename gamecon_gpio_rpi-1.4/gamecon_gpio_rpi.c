@@ -806,12 +806,11 @@ static const short gc_psx_ddr_btn[] = { BTN_0, BTN_1, BTN_2, BTN_3 };
  * the psx pad.
  */
 
-static void gc_psx_command(struct gc *gc, int b, unsigned char *data, int pad_no, bool add_delay)
+static void gc_psx_command(struct gc *gc, int b, unsigned char *data, unsigned int pad_no, bool add_delay)
 {
 	int i;
 	unsigned long read;
-
-	memset(data, 0, GC_MAX_DEVICES);
+	*data = 0x00;
 
 	for (i = 0; i < GC_PSX_LENGTH; i++, b >>= 1) {
 		
@@ -827,7 +826,7 @@ static void gc_psx_command(struct gc *gc, int b, unsigned char *data, int pad_no
 
 		read = GPIO_STATUS;
 
-		data[pad_no] |= (read & GC_PSX_DATA) ? (1 << i) : 0;
+		*data |= (read & GC_PSX_DATA) ? (1 << i) : 0;
 
 		udelay(GC_PSX_DELAY);
 	}
@@ -842,47 +841,41 @@ static void gc_psx_command(struct gc *gc, int b, unsigned char *data, int pad_no
  */
 
 static void gc_psx_read_packet(struct gc *gc,
-				   unsigned char data[GC_MAX_DEVICES][GC_PSX_BYTES],
-				   unsigned char id[GC_MAX_DEVICES])
+				   unsigned char data[GC_PSX_BYTES],
+				   unsigned char *id, unsigned int pad_no)
 {
-	int i, j, max_len = 0;
+	int i, max_len = 0;
 	unsigned long flags;
-	unsigned char data2[GC_MAX_DEVICES];
-	unsigned char id2[GC_MAX_DEVICES];
+	unsigned char data2;
 
-	for(j = 0; j < GC_MAX_DEVICES; j++) {
-		struct gc_pad *pad = &gc->pads[j];
-		if (!(pad->type == GC_PSX || pad->type == GC_DDR)) {
-			continue;
+	local_irq_save(flags);
+
+	/* Select pad */
+	GPIO_SET = GC_PSX_CLOCK | gc_status_bit[pad_no];
+
+	/* Deselect, begin command */
+	GPIO_CLR = gc_status_bit[pad_no];
+	udelay(GC_PSX_DELAY2 * 2);
+
+	gc_psx_command(gc, 0x01, &data2, pad_no, true);	/* Access pad */
+	udelay(GC_PSX_DELAY * 2);
+	gc_psx_command(gc, 0x42, &data2, pad_no, true);		/* Get device ids */
+	*id = data2;
+	if (*id != 0xff) {
+		max_len = GC_PSX_LEN(*id);
+		gc_psx_command(gc, 0, &data2, pad_no, true);		/* Dump status */
+
+		/* Read in all the data */
+		for (i = 0; i < max_len; i++) {
+			gc_psx_command(gc, 0, &data2, pad_no, i < (max_len - 1));
+			data[i] = data2;
 		}
-		local_irq_save(flags);
-
-		/* Select pad */
-		GPIO_SET = GC_PSX_CLOCK | gc_status_bit[j];
-		
-		/* Deselect, begin command */
-		GPIO_CLR = gc_status_bit[j];
-		udelay(GC_PSX_DELAY2);
-
-		gc_psx_command(gc, 0x01, data2, j, true);	/* Access pad */
-		gc_psx_command(gc, 0x42, id2, j, true);		/* Get device ids */
-		id[j] = id2[j];
-		if (id[j] != 0xff) {
-			max_len = GC_PSX_LEN(id[j]);
-			gc_psx_command(gc, 0, data2, j, true);		/* Dump status */
-
-			/* Read in all the data */
-			for (i = 0; i < max_len; i++) {
-				gc_psx_command(gc, 0, data2, j, i < max_len - 1);
-				data[j][i] = data2[j];
-			}
-		}
-		local_irq_restore(flags);
-
-		GPIO_SET = GC_PSX_CLOCK | gc_status_bit[j];
-		udelay(GC_PSX_DELAY2 * 2);
-		id[j] = GC_PSX_ID(id[j]);
 	}
+	local_irq_restore(flags);
+
+	GPIO_SET = GC_PSX_CLOCK | gc_status_bit[pad_no];
+	udelay(GC_PSX_DELAY2);
+	*id = GC_PSX_ID(*id);
 }
 
 static void gc_psx_report_one(struct gc_pad *pad, unsigned char psx_type,
@@ -968,17 +961,18 @@ static void gc_psx_report_one(struct gc_pad *pad, unsigned char psx_type,
 
 static void gc_psx_process_packet(struct gc *gc)
 {
-	unsigned char data[GC_MAX_DEVICES][GC_PSX_BYTES];
-	unsigned char id[GC_MAX_DEVICES];
+	unsigned char data[GC_PSX_BYTES];
+	unsigned char id;
 	struct gc_pad *pad;
 	int i;
 
-	gc_psx_read_packet(gc, data, id);
 
 	for (i = 0; i < GC_MAX_DEVICES; i++) {
 		pad = &gc->pads[i];
-		if (pad->type == GC_PSX || pad->type == GC_DDR)
-			gc_psx_report_one(pad, id[i], data[i]);
+		if (pad->type == GC_PSX || pad->type == GC_DDR) {
+			gc_psx_read_packet(gc, data, &id, i);
+			gc_psx_report_one(pad, id, data);
+		}
 	}
 }
 
