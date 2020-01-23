@@ -775,7 +775,7 @@ static void gc_nes_process_packet(struct gc *gc)
  */
 
 #define GC_PSX_DELAY	6		/* clock phase length in us. Valid clkfreq is 100kHz...500kHz. 2*udelay(3) results to ~250kHz on RPi1. */
-#define GC_PSX_DELAY2	25		/* delay between bytes. */
+#define GC_PSX_DELAY2	18		/* delay between bytes. */
 #define GC_PSX_LENGTH	8		/* talk to the controller in bits */
 #define GC_PSX_BYTES	6		/* the maximum number of bytes to read off the controller */
 
@@ -806,7 +806,7 @@ static const short gc_psx_ddr_btn[] = { BTN_0, BTN_1, BTN_2, BTN_3 };
  * the psx pad.
  */
 
-static void gc_psx_command(struct gc *gc, int b, unsigned char *data, int pad_no)
+static void gc_psx_command(struct gc *gc, int b, unsigned char *data, int pad_no, bool add_delay)
 {
 	int i;
 	unsigned long read;
@@ -832,7 +832,8 @@ static void gc_psx_command(struct gc *gc, int b, unsigned char *data, int pad_no
 		udelay(GC_PSX_DELAY);
 	}
 	
-	udelay(GC_PSX_DELAY2);
+	if (add_delay)
+		udelay(GC_PSX_DELAY2);
 }
 
 /*
@@ -846,7 +847,6 @@ static void gc_psx_read_packet(struct gc *gc,
 {
 	int i, j, max_len = 0;
 	unsigned long flags;
-	unsigned char status;
 	unsigned char data2[GC_MAX_DEVICES];
 	unsigned char id2[GC_MAX_DEVICES];
 
@@ -864,22 +864,23 @@ static void gc_psx_read_packet(struct gc *gc,
 		GPIO_CLR = gc_status_bit[j];
 		udelay(GC_PSX_DELAY2);
 
-		gc_psx_command(gc, 0x01, data2, j);	/* Access pad */
-		gc_psx_command(gc, 0x42, id2, j);		/* Get device ids */
+		gc_psx_command(gc, 0x01, data2, j, true);	/* Access pad */
+		gc_psx_command(gc, 0x42, id2, j, true);		/* Get device ids */
 		id[j] = id2[j];
-		max_len = GC_PSX_LEN(id[j]);
-		gc_psx_command(gc, 0, data2, j);		/* Dump status */
-		status = data2[j];
+		if (id[j] != 0xff) {
+			max_len = GC_PSX_LEN(id[j]);
+			gc_psx_command(gc, 0, data2, j, true);		/* Dump status */
 
-		/* Read in all the data */
-		for (i = 0; i < max_len; i++) {
-			gc_psx_command(gc, 0, data2, j);
-			data[j][i] = data2[j];
+			/* Read in all the data */
+			for (i = 0; i < max_len; i++) {
+				gc_psx_command(gc, 0, data2, j, i < max_len - 1);
+				data[j][i] = data2[j];
+			}
 		}
-
 		local_irq_restore(flags);
 
 		GPIO_SET = GC_PSX_CLOCK | gc_status_bit[j];
+		udelay(GC_PSX_DELAY2 * 2);
 		id[j] = GC_PSX_ID(id[j]);
 	}
 }
